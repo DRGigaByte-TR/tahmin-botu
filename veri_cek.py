@@ -5,7 +5,7 @@ import math
 import sqlite3
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Tahmin Botu v4.0 App", page_icon="📱", layout="wide")
+st.set_page_config(page_title="Tahmin Botu v4.1", page_icon="📱", layout="wide")
 
 API_KEY = "ce08bcf6a8984a09b6cfdcc541e014a9"
 headers = {'X-Auth-Token': API_KEY}
@@ -20,7 +20,6 @@ LIGLER = {
     "Portekiz Primeira Liga": "PPL"
 }
 
-# --- VERİ TABANI (SQLITE) KURULUMU ---
 def init_db():
     conn = sqlite3.connect('kuponlar.db')
     c = conn.cursor()
@@ -43,7 +42,6 @@ init_db()
 def kuponu_kaydet(df):
     conn = sqlite3.connect('kuponlar.db')
     for index, row in df.iterrows():
-        # Aynı maçı iki kere kaydetmemek için kontrol edelim
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM kupon WHERE ev_sahibi=? AND deplasman=?", (row['Ev Sahibi'], row['Deplasman']))
         if cursor.fetchone() is None:
@@ -64,8 +62,7 @@ def kuponu_temizle():
     conn.commit()
     conn.close()
 
-# --- ARKA PLAN FONKSİYONLARI ---
-@st.cache_data(ttl=60) # Veriyi 1 dakika tutar (Canlı skor için süreyi kısalttık)
+@st.cache_data(ttl=60)
 def verileri_cek(lig_kodu):
     url = f'http://api.football-data.org/v4/competitions/{lig_kodu}/matches'
     response = requests.get(url, headers=headers)
@@ -79,7 +76,6 @@ def verileri_cek(lig_kodu):
             ev_takimi = match['homeTeam']['name']
             dep_takimi = match['awayTeam']['name']
             
-            # Canlı veya Bitmiş Skor Bilgisi
             ev_gol = match['score']['fullTime']['home']
             dep_gol = match['score']['fullTime']['away']
             guncel_skor = f"{ev_gol} - {dep_gol}" if ev_gol is not None else "-"
@@ -148,14 +144,12 @@ def ozel_formul_hesapla(takim, df_bitmis):
     atilan_gol_toplami = sum([mac['Ev Gol'] if mac['Ev Sahibi'] == takim else mac['Dep Gol'] for index, mac in takim_maclari.iterrows()])
     return atilan_gol_toplami
 
-# --- ARAYÜZ ---
-st.title("🤖 Yapay Zeka Tahmin Botu v4.0")
+st.title("🤖 Yapay Zeka Tahmin Botu v4.1")
 
 secilen_lig_adi = st.sidebar.selectbox("Lig Seçin:", list(LIGLER.keys()))
 lig_kodu = LIGLER[secilen_lig_adi]
 
-# Yeni sekmelerimiz
-tab1, tab2, tab3 = st.tabs(["🔍 Fikstür Analizi", "📱 Kayıtlı Kuponlarım (Takip)", "✅ Geçmiş Modeli Test Et"])
+tab1, tab2, tab3 = st.tabs(["🔍 Fikstür Analizi", "📱 Kayıtlı Kuponlarım", "✅ Modelleri Test Et"])
 
 with tab1:
     if st.button(f"{secilen_lig_adi} Maçlarını Analiz Et"):
@@ -180,7 +174,6 @@ with tab1:
                         formul_skoru = (ev_son5 + dep_son5) / 10
                         yildiz = "🌟" if 1.60 <= formul_skoru <= 2.10 else ""
                         
-                        # Eğer maç oynanıyorsa skor sütununda göstersin
                         gosterilecek_skor = skor_api if durum_api in ['IN_PLAY', 'PAUSED', 'FINISHED'] else "-"
                         
                         tahminler.append({
@@ -229,15 +222,11 @@ with tab1:
 
 with tab2:
     st.markdown("### 📱 Takip Ettiğim Maçlar")
-    st.info("Bu ekranda kaydettiğin maçları görebilirsin. Canlı skorlar uygulamada analiz butonuna her bastığında güncellenir.")
-    
     kayitli_df = kayitli_kuponlari_getir()
     
     if not kayitli_df.empty:
-        # Sadece göze hoş görünen kısımları ekrana basalım
         gosterim_df = kayitli_df[['tarih', 'ev_sahibi', 'deplasman', 'tahmin', 'oran', 'formul_skoru', 'skor']]
         gosterim_df.columns = ['Tarih', 'Ev Sahibi', 'Deplasman', 'Senin Tahminin', 'Oran', 'Senin Formülün', 'Skor Durumu']
-        
         st.dataframe(gosterim_df, hide_index=True, use_container_width=True)
         
         col1, col2 = st.columns([1, 4])
@@ -246,28 +235,76 @@ with tab2:
                 kuponu_temizle()
                 st.rerun()
     else:
-        st.warning("Henüz kaydedilmiş bir maçınız bulunmuyor. Fikstürden maç seçip kaydedebilirsiniz.")
+        st.warning("Henüz kaydedilmiş bir maçınız bulunmuyor.")
 
+# --- YENİLENEN TEST (BACKTESTING) EKRANI ---
 with tab3:
-    st.markdown("### Modelimizin Geçmiş Başarısı Ne Durumda?")
-    if st.button("Son 20 Maçı Test Et"):
-        with st.spinner('Test ediliyor...'):
+    st.markdown("### ⚖️ Yapay Zeka vs. Senin Özel Formülün")
+    st.info("Bu ekran son 50 maçı tarar. Hem yapay zekanın tüm maçlardaki başarısını ölçer, hem de senin formülüne (1.60-2.10 arası) uyan maçları bulup onların ne kadarının ÜST bittiğini kanıtlar.")
+    
+    if st.button("Son 50 Maçı Test Et"):
+        with st.spinner('Geçmiş maçlar taranıyor, formül eşleştirmeleri yapılıyor...'):
             mac_tablosu, _ = verileri_cek(lig_kodu)
             if mac_tablosu is not None:
                 ev_guc, dep_guc, lig_ev_ort, lig_dep_ort = gucleri_hesapla(mac_tablosu)
-                son_maclar = mac_tablosu.tail(20)
+                
+                # Testi daha anlamlı kılmak için 50 maça çıkardık
+                son_maclar = mac_tablosu.tail(50)
                 test_sonuclari = []
-                dogru = 0
+                
+                bot_dogru = 0
+                formul_tetiklenen_mac_sayisi = 0
+                formul_dogru = 0
+                
                 for index, mac in son_maclar.iterrows():
                     ev, dep, tarih = mac['Ev Sahibi'], mac['Deplasman'], mac['Tarih']
                     gercek_toplam = mac['Ev Gol'] + mac['Dep Gol']
                     gercek_durum = "ÜST" if gercek_toplam > 2.5 else "ALT"
+                    
                     try:
+                        # 1. Bot Tahmini (Poisson)
                         alt_y, ust_y = tahmin_olasiliklarini_al(ev, dep, ev_guc, dep_guc, lig_ev_ort, lig_dep_ort)
                         bot_tahmin = "ÜST" if ust_y > alt_y else "ALT"
-                        basarili_mi = "✅" if bot_tahmin == gercek_durum else "❌"
-                        if bot_tahmin == gercek_durum: dogru += 1
-                        test_sonuclari.append({"Maç": f"{ev} - {dep}", "Gerçek": gercek_durum, "Bot": bot_tahmin, "Sonuç": basarili_mi})
+                        bot_basarili_mi = "✅" if bot_tahmin == gercek_durum else "❌"
+                        if bot_tahmin == gercek_durum: bot_dogru += 1
+                        
+                        # 2. Senin Formülünün Tahmini
+                        ev_son5 = ozel_formul_hesapla(ev, mac_tablosu)
+                        dep_son5 = ozel_formul_hesapla(dep, mac_tablosu)
+                        formul_skoru = (ev_son5 + dep_son5) / 10
+                        
+                        formul_tahmin = "-"
+                        formul_basarili_mi = "-"
+                        
+                        # Eğer maç senin aralığına giriyorsa (1.60 - 2.10), formül ÜST der!
+                        if 1.60 <= formul_skoru <= 2.10:
+                            formul_tahmin = "ÜST (🌟)"
+                            formul_tetiklenen_mac_sayisi += 1
+                            if gercek_durum == "ÜST":
+                                formul_basarili_mi = "✅"
+                                formul_dogru += 1
+                            else:
+                                formul_basarili_mi = "❌"
+                                
+                        test_sonuclari.append({
+                            "Maç": f"{ev} - {dep}", 
+                            "Gerçek": gercek_durum, 
+                            "Bot Tahmini": bot_tahmin, 
+                            "Bot Sonuç": bot_basarili_mi,
+                            "Formül Skoru": round(formul_skoru, 2),
+                            "Formül Tahmini": formul_tahmin,
+                            "Formül Sonuç": formul_basarili_mi
+                        })
                     except KeyError: pass
+                
                 st.dataframe(pd.DataFrame(test_sonuclari), use_container_width=True)
-                st.metric("Başarı Oranı", f"% {(dogru/len(test_sonuclari))*100:.1f}")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("🤖 Botun Genel Başarı Oranı", f"% {(bot_dogru/len(test_sonuclari))*100:.1f}", f"50 maçta {bot_dogru} doğru")
+                with col2:
+                    if formul_tetiklenen_mac_sayisi > 0:
+                        formul_yuzde = (formul_dogru / formul_tetiklenen_mac_sayisi) * 100
+                        st.metric("🌟 Özel Formülünün Başarı Oranı", f"% {formul_yuzde:.1f}", f"{formul_tetiklenen_mac_sayisi} uygun maçta {formul_dogru} doğru")
+                    else:
+                        st.metric("🌟 Özel Formülünün Başarı Oranı", "% 0", "Son 50 maçta formüle uygun maç bulunamadı")
