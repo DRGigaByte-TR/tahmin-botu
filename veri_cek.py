@@ -5,16 +5,20 @@ import math
 import io
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Tahmin Botu v2.1", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Tahmin Botu v3.0 Pro", page_icon="⚽", layout="wide")
 
 API_KEY = "ce08bcf6a8984a09b6cfdcc541e014a9"
 headers = {'X-Auth-Token': API_KEY}
 
+# Yeni Ligler Eklendi
 LIGLER = {
     "İngiltere Premier Lig": "PL",
     "İspanya La Liga": "PD",
     "İtalya Serie A": "SA",
-    "Almanya Bundesliga": "BL1"
+    "Almanya Bundesliga": "BL1",
+    "Fransa Ligue 1": "FL1",
+    "Hollanda Eredivisie": "DED",
+    "Portekiz Primeira Liga": "PPL"
 }
 
 @st.cache_data(ttl=3600)
@@ -31,19 +35,15 @@ def verileri_cek(lig_kodu):
             ev_takimi = match['homeTeam']['name']
             dep_takimi = match['awayTeam']['name']
             
-            # --- YENİ: TARİH VE SAAT FORMATLAMA ---
             ham_tarih = match.get('utcDate', '')
             tarih_str = "Belirsiz"
             if ham_tarih:
                 try:
-                    # API'den gelen saati anla (Örn: 2024-05-18T14:00:00Z)
                     dt = datetime.strptime(ham_tarih, '%Y-%m-%dT%H:%M:%SZ')
-                    # Türkiye saatine göre ayarla (UTC + 3)
-                    dt += timedelta(hours=3)
-                    # Gözümüze hoş görünecek şekilde formatla
+                    dt += timedelta(hours=3) # Türkiye Saati
                     tarih_str = dt.strftime('%d.%m.%Y %H:%M')
                 except:
-                    tarih_str = ham_tarih[:10] # Bir hata olursa sadece tarihi al
+                    tarih_str = ham_tarih[:10]
             
             if durum == 'FINISHED':
                 bitmis.append({
@@ -95,16 +95,28 @@ def tahmin_olasiliklarini_al(ev_takimi, dep_takimi, ev_guc, dep_guc, lig_ev_ort,
                 ust_olasiligi += ihtimal
     return alt_olasiligi * 100, ust_olasiligi * 100
 
-st.title("🤖 Yapay Zeka Tahmin Botu v2.1")
+# --- SENİN ÖZEL FORMÜLÜN İÇİN FONKSİYON ---
+def ozel_formul_hesapla(takim, df_bitmis):
+    # Takımın son oynadığı 5 maçı bul (Ev veya Deplasman fark etmez)
+    takim_maclari = df_bitmis[(df_bitmis['Ev Sahibi'] == takim) | (df_bitmis['Deplasman'] == takim)].tail(5)
+    atilan_gol_toplami = 0
+    for index, mac in takim_maclari.iterrows():
+        if mac['Ev Sahibi'] == takim:
+            atilan_gol_toplami += mac['Ev Gol']
+        else:
+            atilan_gol_toplami += mac['Dep Gol']
+    return atilan_gol_toplami
+
+st.title("🤖 Yapay Zeka Tahmin Botu v3.0 Pro")
 
 secilen_lig_adi = st.sidebar.selectbox("Lig Seçin:", list(LIGLER.keys()))
 lig_kodu = LIGLER[secilen_lig_adi]
 
-tab1, tab2 = st.tabs(["📅 Gelecek Fikstür Tahminleri", "✅ Geçmiş Modeli Test Et"])
+tab1, tab2 = st.tabs(["📅 Gelecek Fikstür & Kupon", "✅ Geçmiş Modeli Test Et"])
 
 with tab1:
-    if st.button("Gelecek Maçları Analiz Et"):
-        with st.spinner('Analiz ediliyor...'):
+    if st.button(f"{secilen_lig_adi} Maçlarını Analiz Et"):
+        with st.spinner('Matematiksel modeller ve özel formüller hesaplanıyor...'):
             mac_tablosu, gelecek_fikstur = verileri_cek(lig_kodu)
             
             if mac_tablosu is not None and not gelecek_fikstur.empty:
@@ -115,30 +127,48 @@ with tab1:
                     ev = mac['Ev Sahibi']
                     dep = mac['Deplasman']
                     hafta = mac['Hafta']
-                    tarih = mac['Tarih'] # Tarihi alıyoruz
+                    tarih = mac['Tarih']
                     try:
+                        # 1. Klasik Poisson Tahmini
                         alt_y, ust_y = tahmin_olasiliklarini_al(ev, dep, ev_guc, dep_guc, lig_ev_ort, lig_dep_ort)
                         durum = "ÜST" if ust_y > alt_y else "ALT"
                         yuzde = max(alt_y, ust_y)
+                        
+                        # Adil Oran Hesaplama (100 / İhtimal)
+                        adil_oran = round(100 / yuzde, 2)
+                        
+                        # 2. SENİN ÖZEL FORMÜLÜN
+                        ev_son5_gol = ozel_formul_hesapla(ev, mac_tablosu)
+                        dep_son5_gol = ozel_formul_hesapla(dep, mac_tablosu)
+                        formul_skoru = (ev_son5_gol + dep_son5_gol) / 10
+                        
+                        # Yıldız Şartı (1.60 ile 2.10 arası)
+                        yildiz = "🌟" if 1.60 <= formul_skoru <= 2.10 else ""
+                        
                         tahminler.append({
+                            "Seç": False, # Kupon kutucuğu için
                             "Hafta": hafta,
-                            "Tarih ve Saat": tarih, # Tabloya ekliyoruz
+                            "Tarih": tarih,
                             "Ev Sahibi": ev,
                             "Deplasman": dep,
                             "Tahmin": durum,
-                            "İhtimal (%)": round(yuzde, 2)
+                            "İhtimal (%)": round(yuzde, 2),
+                            "Botun Adil Oranı": adil_oran,
+                            "Özel Formül Skoru": round(formul_skoru, 2),
+                            "Eşleşme": yildiz
                         })
                     except KeyError:
                         pass
                 
                 st.session_state['gelecek_df'] = pd.DataFrame(tahminler)
-                st.success("Gelecek maçlar analiz edildi!")
+                st.success("Tüm analizler tamamlandı!")
             else:
                 st.error("Veri bulunamadı veya henüz oynanacak maç yok.")
 
     if 'gelecek_df' in st.session_state:
         df = st.session_state['gelecek_df']
         
+        # Hafta Filtresi
         mevcut_haftalar = sorted(df['Hafta'].unique())
         secilen_hafta = st.selectbox("Görüntülemek İstediğiniz Haftayı Seçin:", ["Tüm Haftalar"] + list(mevcut_haftalar))
         
@@ -147,11 +177,42 @@ with tab1:
         else:
             df_goster = df
             
-        st.dataframe(df_goster, use_container_width=True)
+        st.markdown("### 🔍 Lig Fikstürü (Kupona eklemek için 'Seç' kutucuğunu işaretleyin)")
+        st.caption("🌟: Senin geçmişte %96 başarı sağladığın 'Son 5 Maçın Gol Ortalaması (1.60 - 2.10)' formülüne uyan maçlar!")
+        
+        # Etkileşimli Tablo (Checkbox içerir)
+        edited_df = st.data_editor(
+            df_goster,
+            hide_index=True,
+            column_config={
+                "Seç": st.column_config.CheckboxColumn("Kupona Ekle", help="Kupona eklemek için işaretle")
+            },
+            disabled=["Hafta", "Tarih", "Ev Sahibi", "Deplasman", "Tahmin", "İhtimal (%)", "Botun Adil Oranı", "Özel Formül Skoru", "Eşleşme"],
+            use_container_width=True
+        )
+        
+        # KUPON BÖLÜMÜ
+        secilen_maclar = edited_df[edited_df["Seç"] == True]
+        
+        if not secilen_maclar.empty:
+            st.markdown("---")
+            st.markdown("### 📝 Benim Kuponum (Takip Listesi)")
+            st.dataframe(secilen_maclar.drop(columns=["Seç"]), hide_index=True, use_container_width=True)
+            
+            # Excel İndirme Butonu (Sadece kupon için)
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                secilen_maclar.drop(columns=["Seç"]).to_excel(writer, index=False, sheet_name='Kuponum')
+            
+            st.download_button(
+                label="📥 Kuponu Excel Olarak İndir",
+                data=buffer.getvalue(),
+                file_name="Kuponum.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 with tab2:
     st.markdown("### Modelimizin Geçmiş Başarısı Ne Durumda?")
-    st.info("Bu özellik, sistemin bitmiş maçları sanki skorunu bilmiyormuş gibi tahmin etmesini ve gerçek sonuçla kıyaslamasını sağlar.")
     
     if st.button("Son 20 Maçı Test Et"):
         with st.spinner('Geçmiş maçlar test ediliyor...'):
@@ -160,7 +221,6 @@ with tab2:
                 ev_guc, dep_guc, lig_ev_ort, lig_dep_ort = gucleri_hesapla(mac_tablosu)
                 
                 son_maclar = mac_tablosu.tail(20)
-                
                 test_sonuclari = []
                 dogru_tahmin = 0
                 
