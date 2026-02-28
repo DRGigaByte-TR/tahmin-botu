@@ -5,7 +5,7 @@ import math
 import sqlite3
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Tahmin Botu v6.0", page_icon="📱", layout="wide")
+st.set_page_config(page_title="Tahmin Botu v7.0", page_icon="📱", layout="wide")
 
 API_KEY = "ce08bcf6a8984a09b6cfdcc541e014a9"
 headers = {'X-Auth-Token': API_KEY}
@@ -62,12 +62,9 @@ def kuponu_temizle():
     conn.commit()
     conn.close()
 
-# --- YENİDEN YAZILAN KUSURSUZ SKOR GÜNCELLEME MOTORU ---
 def skorlari_guncelle():
     conn = sqlite3.connect('kuponlar.db')
     c = conn.cursor()
-    
-    # Sadece 'Bekliyor' olan maçları veritabanından çek (Bitenleri boşuna yorma)
     c.execute("SELECT id, ev_sahibi, deplasman, tahmin FROM kupon WHERE durum LIKE '%Bekliyor%'")
     bekleyenler = c.fetchall()
     
@@ -84,36 +81,41 @@ def skorlari_guncelle():
         if b_df is not None and not b_df.empty: tum_bitmis.append(b_df)
         if g_df is not None and not g_df.empty: tum_gelecek.append(g_df)
         
-    df_b = pd.concat(tum_bitmis) if tum_bitmis else pd.DataFrame()
-    df_g = pd.concat(tum_gelecek) if tum_gelecek else pd.DataFrame()
+    df_b = pd.concat(tum_bitmis, ignore_index=True) if tum_bitmis else pd.DataFrame()
+    df_g = pd.concat(tum_gelecek, ignore_index=True) if tum_gelecek else pd.DataFrame()
 
     for row in bekleyenler:
         m_id, ev, dep, tahmin = row
         
-        # 1. Maç Bitti Mi Diye Kontrol Et
-        if not df_b.empty:
-            b_match = df_b[(df_b['Ev Sahibi'] == ev) & (df_b['Deplasman'] == dep)]
-            if not b_match.empty:
-                b_match = b_match.iloc[0]
-                skor_str = f"{int(b_match['Ev Gol'])} - {int(b_match['Dep Gol'])}"
-                toplam = b_match['Ev Gol'] + b_match['Dep Gol']
-                gercek_durum = "ÜST" if toplam > 2.5 else "ALT"
-                sonuc = "✅ Kazandı" if tahmin == gercek_durum else "❌ Kaybetti"
-                
-                c.execute("UPDATE kupon SET skor=?, durum=? WHERE id=?", (skor_str, sonuc, m_id))
-                guncellenen_sayi += 1
-                continue
-                
-        # 2. Maç Oynanıyor Mu Diye Kontrol Et (Canlı Skor)
-        if not df_g.empty:
-            g_match = df_g[(df_g['Ev Sahibi'] == ev) & (df_g['Deplasman'] == dep)]
-            if not g_match.empty:
-                g_match = g_match.iloc[0]
-                skor_str = g_match.get('Güncel Skor', '-')
-                durum_api = g_match.get('Durum', '')
-                if durum_api in ['IN_PLAY', 'PAUSED'] and skor_str != '-':
-                    c.execute("UPDATE kupon SET skor=? WHERE id=?", (skor_str, m_id))
+        try:
+            # Maç Bitti Mi?
+            if not df_b.empty:
+                b_match = df_b[(df_b['Ev Sahibi'] == ev) & (df_b['Deplasman'] == dep)]
+                if not b_match.empty:
+                    b_match = b_match.iloc[0]
+                    ev_g = int(b_match['Ev Gol'])
+                    dep_g = int(b_match['Dep Gol'])
+                    skor_str = f"{ev_g} - {dep_g}"
+                    gercek_durum = "ÜST" if (ev_g + dep_g) > 2.5 else "ALT"
+                    sonuc = "✅ Kazandı" if tahmin == gercek_durum else "❌ Kaybetti"
+                    
+                    c.execute("UPDATE kupon SET skor=?, durum=? WHERE id=?", (skor_str, sonuc, m_id))
                     guncellenen_sayi += 1
+                    continue
+                    
+            # Maç Oynanıyor Mu?
+            if not df_g.empty:
+                g_match = df_g[(df_g['Ev Sahibi'] == ev) & (df_g['Deplasman'] == dep)]
+                if not g_match.empty:
+                    g_match = g_match.iloc[0]
+                    skor_str = str(g_match.get('Güncel Skor', '-'))
+                    durum_api = str(g_match.get('Durum', ''))
+                    
+                    if durum_api in ['IN_PLAY', 'PAUSED'] and skor_str != '-':
+                        c.execute("UPDATE kupon SET skor=? WHERE id=?", (skor_str, m_id))
+                        guncellenen_sayi += 1
+        except Exception as e:
+            continue # Hata veren maçı atla, sistemi çökertme
 
     conn.commit()
     conn.close()
@@ -127,18 +129,23 @@ def verileri_cek(lig_kodu):
         matches = response.json().get('matches', [])
         bitmis = []
         gelecek = []
+        simdi = datetime.now()
+        
         for match in matches:
             durum = match['status']
             hafta = match.get('matchday', 0)
             ev_takimi = match['homeTeam']['name']
             dep_takimi = match['awayTeam']['name']
             
-            ev_gol = match['score']['fullTime']['home']
-            dep_gol = match['score']['fullTime']['away']
-            guncel_skor = f"{ev_gol} - {dep_gol}" if ev_gol is not None else "-"
+            # Daha güvenli skor çekme mantığı
+            score_data = match.get('score', {})
+            full_time = score_data.get('fullTime') or {}
+            ev_gol = full_time.get('home')
+            dep_gol = full_time.get('away')
             
+            # Tarih Çevirme
             ham_tarih = match.get('utcDate', '')
-            tarih_str = "Belirsiz"
+            dt = None
             if ham_tarih:
                 try:
                     dt = datetime.strptime(ham_tarih, '%Y-%m-%dT%H:%M:%SZ')
@@ -147,10 +154,18 @@ def verileri_cek(lig_kodu):
                 except:
                     tarih_str = ham_tarih[:10]
             
+            # YENİ: Eski Tarihli Ertelenmiş Maçları Çöpe At!
+            if durum != 'FINISHED' and dt is not None:
+                if dt < (simdi - timedelta(days=2)):
+                    continue # 2 günden eskiyse ve bitmediyse, kesin ertelenmiştir.
+            
             if durum == 'FINISHED':
-                bitmis.append({'Hafta': hafta, 'Tarih': tarih_str, 'Ev Sahibi': ev_takimi, 'Deplasman': dep_takimi, 'Ev Gol': ev_gol, 'Dep Gol': dep_gol})
-            elif durum in ['SCHEDULED', 'TIMED', 'IN_PLAY', 'PAUSED']: 
+                if ev_gol is not None and dep_gol is not None:
+                    bitmis.append({'Hafta': hafta, 'Tarih': tarih_str, 'Ev Sahibi': ev_takimi, 'Deplasman': dep_takimi, 'Ev Gol': ev_gol, 'Dep Gol': dep_gol})
+            elif durum in ['SCHEDULED', 'TIMED', 'IN_PLAY', 'PAUSED']:
+                guncel_skor = f"{int(ev_gol)} - {int(dep_gol)}" if (ev_gol is not None and dep_gol is not None) else "-"
                 gelecek.append({'Hafta': hafta, 'Tarih': tarih_str, 'Ev Sahibi': ev_takimi, 'Deplasman': dep_takimi, 'Durum': durum, 'Güncel Skor': guncel_skor})
+                
         return pd.DataFrame(bitmis), pd.DataFrame(gelecek)
     return None, None
 
@@ -186,7 +201,7 @@ def ozel_formul_hesapla(takim, df_bitmis):
     return atilan_gol_toplami
 
 # --- ARAYÜZ ---
-st.title("🤖 Yapay Zeka Tahmin Botu v6.0")
+st.title("🤖 Yapay Zeka Tahmin Botu v7.0")
 
 st.sidebar.markdown("### ⚙️ Genel Ayarlar")
 secilen_lig_adi = st.sidebar.selectbox("Lig Seçin:", list(LIGLER.keys()))
@@ -197,7 +212,6 @@ st.sidebar.markdown("### 🌟 Özel Formül (Yıldız) Ayarları")
 min_formul = st.sidebar.number_input("Minimum Eşik (Örn: 1.55)", value=1.60, step=0.05)
 max_formul = st.sidebar.number_input("Maksimum Eşik (Örn: 2.25)", value=2.10, step=0.05)
 
-# Sekmeleri 4'e çıkardık
 tab1, tab2, tab3, tab4 = st.tabs(["🔍 Fikstür", "🔥 AI Hazır Kuponlar", "📱 Takip (Canlı)", "✅ Test Et"])
 
 with tab1:
@@ -221,7 +235,7 @@ with tab1:
                         formul_skoru = (ev_son5 + dep_son5) / 10
                         yildiz = "🌟" if min_formul <= formul_skoru <= max_formul else ""
                         
-                        gosterilecek_skor = skor_api if durum_api in ['IN_PLAY', 'PAUSED', 'FINISHED'] else "-"
+                        gosterilecek_skor = skor_api if durum_api in ['IN_PLAY', 'PAUSED'] else "-"
                         tahminler.append({"Kupona Ekle": False, "Hafta": hafta, "Tarih": tarih, "Ev Sahibi": ev, "Deplasman": dep, "Tahmin": durum, "Botun Adil Oranı": adil_oran, "Özel Formül Skoru": round(formul_skoru, 2), "Yıldız": yildiz, "Canlı Skor": gosterilecek_skor})
                     except KeyError: pass
                 
@@ -243,17 +257,15 @@ with tab1:
                 kuponu_kaydet(secilen_maclar)
                 st.success("Takip sekmesine kaydedildi!")
 
-# --- YENİ BÖLÜM: YAPAY ZEKA HAZIR KUPONLAR ---
 with tab2:
     st.markdown("### 🔥 Sistem Tarafından Üretilen Kuponlar")
-    st.info("Botumuz, tüm ligleri tek tek tarayıp senin için en yüksek olasılıklı maçları seçer.")
     
-    if st.button("🚀 Bugünün Kuponlarını Oluştur (Tüm Ligleri Tara)"):
-        with st.spinner("Tüm Avrupa taramadan geçiriliyor, bu işlem 10-15 saniye sürebilir..."):
+    if st.button("🚀 Bugünün Kuponlarını Oluştur"):
+        with st.spinner("Tüm Avrupa taranıyor..."):
             havuz = []
             for l_isim, l_kod in LIGLER.items():
                 b_df, g_df = verileri_cek(l_kod)
-                if b_df is not None and not g_df.empty:
+                if b_df is not None and g_df is not None and not g_df.empty:
                     ev_guc, dep_guc, l_ev_ort, l_dep_ort = gucleri_hesapla(b_df)
                     for _, mac in g_df.iterrows():
                         ev, dep, tarih = mac['Ev Sahibi'], mac['Deplasman'], mac['Tarih']
@@ -268,44 +280,46 @@ with tab2:
                             
                             havuz.append({
                                 "Lig": l_isim, "Tarih": tarih, "Ev Sahibi": ev, "Deplasman": dep, 
-                                "Tahmin": durum, "İhtimal (%)": round(yuzde, 2), "Oran": round(100/yuzde, 2), 
-                                "Formül Skoru": formul_skoru
+                                "Tahmin": durum, "İhtimal (%)": round(yuzde, 2), "Botun Adil Oranı": round(100/yuzde, 2), 
+                                "Özel Formül Skoru": round(formul_skoru, 2)
                             })
                         except: pass
             
             if havuz:
                 havuz_df = pd.DataFrame(havuz)
+                st.session_state['banko_kupon'] = havuz_df.sort_values(by="İhtimal (%)", ascending=False).head(4)
                 
-                # 1. Banko Kupon (Sistemdeki En Yüksek Yüzdeli 5 Maç)
-                banko_kupon = havuz_df.sort_values(by="İhtimal (%)", ascending=False).head(5)
-                
-                # 2. Formül Kuponu (Senin Yıldızlı Aralıklarına Giren En Yüksek 5 Maç)
-                formul_kupon = havuz_df[(havuz_df["Formül Skoru"] >= min_formul) & (havuz_df["Formül Skoru"] <= max_formul)]
-                formul_kupon = formul_kupon.sort_values(by="İhtimal (%)", ascending=False).head(5)
-                
-                st.markdown("#### 🤖 Yapay Zeka: Avrupa'nın En Garanti 5 Maçı")
-                st.dataframe(banko_kupon[['Lig', 'Tarih', 'Ev Sahibi', 'Deplasman', 'Tahmin', 'İhtimal (%)', 'Oran']], hide_index=True)
-                
-                st.markdown("#### 🌟 Senin Özel Formülün: Kusursuz Aralık (1.60-2.10 vb.)")
-                if not formul_kupon.empty:
-                    st.dataframe(formul_kupon[['Lig', 'Tarih', 'Ev Sahibi', 'Deplasman', 'Tahmin', 'İhtimal (%)', 'Formül Skoru']], hide_index=True)
-                else:
-                    st.warning("Bu hafta formülüne uygun eşleşen maç bulunamadı. Ayarlardan aralığı esnetebilirsin.")
-            else:
-                st.error("Veri çekilemedi.")
+                f_kupon = havuz_df[(havuz_df["Özel Formül Skoru"] >= min_formul) & (havuz_df["Özel Formül Skoru"] <= max_formul)]
+                st.session_state['formul_kupon'] = f_kupon.sort_values(by="İhtimal (%)", ascending=False).head(4)
+
+    # Ekrana Basma ve Takip Butonları
+    if 'banko_kupon' in st.session_state:
+        st.markdown("#### 🤖 Yapay Zeka Banko Kupon (En Yüksek İhtimal)")
+        st.dataframe(st.session_state['banko_kupon'][['Lig', 'Tarih', 'Ev Sahibi', 'Deplasman', 'Tahmin', 'İhtimal (%)', 'Botun Adil Oranı']], hide_index=True)
+        if st.button("💾 AI Banko Kuponunu Takibe Al"):
+            kuponu_kaydet(st.session_state['banko_kupon'])
+            st.success("AI Banko Kuponu 'Takip (Canlı)' sekmesine eklendi!")
+
+        st.markdown("---")
+        st.markdown("#### 🌟 Özel Formül Kuponun (Senin Aralığın)")
+        if not st.session_state['formul_kupon'].empty:
+            st.dataframe(st.session_state['formul_kupon'][['Lig', 'Tarih', 'Ev Sahibi', 'Deplasman', 'Tahmin', 'İhtimal (%)', 'Özel Formül Skoru']], hide_index=True)
+            if st.button("💾 Formül Kuponunu Takibe Al"):
+                kuponu_kaydet(st.session_state['formul_kupon'])
+                st.success("Formül Kuponu 'Takip (Canlı)' sekmesine eklendi!")
+        else:
+            st.warning("Seçtiğin aralığa uygun maç bulunamadı.")
 
 with tab3:
     st.markdown("### 📱 Takip Ettiğim Maçlar (Canlı Kupon)")
     
-    # Güncelleme butonu en üste kocaman kondu!
     col_guncelle, _ = st.columns([1, 2])
     with col_guncelle:
         if st.button("🔄 Skorları ve Sonuçları Güncelle", use_container_width=True):
             with st.spinner("Tüm ligler taranıyor, veritabanı eşitleniyor..."):
                 verileri_cek.clear()
                 g_sayi = skorlari_guncelle()
-                st.success(f"Güncelleme Tamamlandı! ({g_sayi} maçın skoru/durumu yenilendi)")
-                st.rerun()
+                st.success(f"Güncelleme Tamamlandı! ({g_sayi} maç yenilendi)")
                 
     kayitli_df = kayitli_kuponlari_getir()
     
@@ -314,8 +328,7 @@ with tab3:
         gosterim_df.columns = ['Tarih', 'Ev Sahibi', 'Deplasman', 'Senin Tahminin', 'Adil Oran', 'Formül Skoru', 'Maç Skoru', 'Kupon Durumu']
         st.dataframe(gosterim_df, hide_index=True, use_container_width=True)
         
-        # Temizle butonu en alta uzak bir köşeye alındı
-        st.markdown("<br><br><br>", unsafe_allow_html=True) # Boşluk eklendi
+        st.markdown("<br><br><br>", unsafe_allow_html=True)
         with st.expander("⚠️ Tehlikeli Alan (Kuponu Sil)"):
             if st.button("🗑️ Tüm Kayıtlı Kuponları Temizle"):
                 kuponu_temizle()
