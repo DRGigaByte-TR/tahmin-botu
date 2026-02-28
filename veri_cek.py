@@ -408,3 +408,12 @@ with tab4:
                             if gercek_durum == "ÜST":
                                 f_sonuc = "✅"
                                 formul_dogru += 1
+                            else: f_sonuc = "❌"
+                                
+                        test_sonuclari.append({"Maç": f"{ev}-{dep}", "Gerçek": gercek_durum, "Bot": bot_tahmin, "Bot Sonuç": bot_basarili_mi, "Formül Skoru": round(f_skor, 2), "Taktik": f_tahmin, "Taktik Sonuç": f_sonuc})
+                    except KeyError: pass
+                st.dataframe(pd.DataFrame(test_sonuclari), use_container_width=True)
+                col1, col2 = st.columns(2)
+                with col1: st.metric("🤖 Bot Başarısı", f"% {(bot_dogru/len(test_sonuclari))*100:.1f}")
+                with col2:
+                    if formul_tet_sayi > 0: st.metric("🌟 Özel Formül Başarısı", f"% {(formul_dogru / formul_tet_sayi) * 100:.1f}", f"{formul_tet_sayi} maçta {formul_dogru} doğru")
