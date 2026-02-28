@@ -5,7 +5,7 @@ import math
 import sqlite3
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Tahmin Botu v5.0", page_icon="📱", layout="wide")
+st.set_page_config(page_title="Tahmin Botu v5.1", page_icon="📱", layout="wide")
 
 API_KEY = "ce08bcf6a8984a09b6cfdcc541e014a9"
 headers = {'X-Auth-Token': API_KEY}
@@ -32,7 +32,7 @@ def init_db():
                     oran REAL,
                     formul_skoru REAL,
                     skor TEXT DEFAULT '-',
-                    durum TEXT DEFAULT 'Bekliyor'
+                    durum TEXT DEFAULT '⏳ Bekliyor'
                 )''')
     conn.commit()
     conn.close()
@@ -62,7 +62,48 @@ def kuponu_temizle():
     conn.commit()
     conn.close()
 
-@st.cache_data(ttl=60)
+# --- YENİ: SKORLARI OTOMATİK GÜNCELLEME VE SONUÇLANDIRMA ---
+def skorlari_guncelle():
+    conn = sqlite3.connect('kuponlar.db')
+    c = conn.cursor()
+    
+    tum_maclar = []
+    # Arka planda tüm liglerin en güncel halini hızlıca çekiyoruz
+    for lig_isim, lig_kod in LIGLER.items():
+        bitmis_df, gelecek_df = verileri_cek(lig_kod)
+        
+        # Biten maçların kesin skorlarını ve ÜST/ALT durumlarını alıyoruz
+        if bitmis_df is not None and not bitmis_df.empty:
+            for _, r in bitmis_df.iterrows():
+                skor_str = f"{int(r['Ev Gol'])} - {int(r['Dep Gol'])}"
+                toplam_gol = r['Ev Gol'] + r['Dep Gol']
+                gercek_durum = "ÜST" if toplam_gol > 2.5 else "ALT"
+                tum_maclar.append({'ev': r['Ev Sahibi'], 'dep': r['Deplasman'], 'skor': skor_str, 'gercek_durum': gercek_durum})
+                
+        # Oynanmakta olan maçların anlık skorlarını alıyoruz
+        if gelecek_df is not None and not gelecek_df.empty:
+            for _, r in gelecek_df.iterrows():
+                skor_str = r.get('Güncel Skor', '-')
+                tum_maclar.append({'ev': r['Ev Sahibi'], 'dep': r['Deplasman'], 'skor': skor_str, 'gercek_durum': 'Bekliyor'})
+                
+    # Veri tabanındaki kuponlarımızı güncelliyoruz
+    for mac in tum_maclar:
+        # Önce skoru güncelle
+        c.execute("UPDATE kupon SET skor = ? WHERE ev_sahibi = ? AND deplasman = ?", (mac['skor'], mac['ev'], mac['dep']))
+        
+        # Eğer maç bittiyse kuponu sonuçlandır! (Kazandı / Kaybetti)
+        if mac['skor'] != '-' and mac['gercek_durum'] != 'Bekliyor':
+            c.execute("SELECT tahmin FROM kupon WHERE ev_sahibi = ? AND deplasman = ?", (mac['ev'], mac['dep']))
+            row = c.fetchone()
+            if row:
+                tahmin = row[0]
+                sonuc_yazisi = "✅ Kazandı" if tahmin == mac['gercek_durum'] else "❌ Kaybetti"
+                c.execute("UPDATE kupon SET durum = ? WHERE ev_sahibi = ? AND deplasman = ?", (sonuc_yazisi, mac['ev'], mac['dep']))
+                
+    conn.commit()
+    conn.close()
+
+@st.cache_data(ttl=60) # Her 60 saniyede bir yeni veri çekmeye izin verir (Canlı skor için ideal)
 def verileri_cek(lig_kodu):
     url = f'http://api.football-data.org/v4/competitions/{lig_kodu}/matches'
     response = requests.get(url, headers=headers)
@@ -145,16 +186,14 @@ def ozel_formul_hesapla(takim, df_bitmis):
     return atilan_gol_toplami
 
 # --- ARAYÜZ ---
-st.title("🤖 Yapay Zeka Tahmin Botu v5.0")
+st.title("🤖 Yapay Zeka Tahmin Botu v5.1")
 
 st.sidebar.markdown("### ⚙️ Genel Ayarlar")
 secilen_lig_adi = st.sidebar.selectbox("Lig Seçin:", list(LIGLER.keys()))
 lig_kodu = LIGLER[secilen_lig_adi]
 
-# YENİ: DİNAMİK FORMÜL AYARLARI
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🌟 Özel Formül (Yıldız) Ayarları")
-st.sidebar.caption("Efsanevi aralığını bulana kadar bu değerlerle oynayabilirsin!")
 min_formul = st.sidebar.number_input("Minimum Eşik (Örn: 1.55)", value=1.60, step=0.05)
 max_formul = st.sidebar.number_input("Maksimum Eşik (Örn: 2.25)", value=2.10, step=0.05)
 
@@ -181,8 +220,6 @@ with tab1:
                         ev_son5 = ozel_formul_hesapla(ev, mac_tablosu)
                         dep_son5 = ozel_formul_hesapla(dep, mac_tablosu)
                         formul_skoru = (ev_son5 + dep_son5) / 10
-                        
-                        # Yıldız Şartı Artık Dinamik!
                         yildiz = "🌟" if min_formul <= formul_skoru <= max_formul else ""
                         
                         gosterilecek_skor = skor_api if durum_api in ['IN_PLAY', 'PAUSED', 'FINISHED'] else "-"
@@ -232,34 +269,40 @@ with tab1:
                 st.success("Kupon başarıyla 'Kayıtlı Kuponlarım' sekmesine kaydedildi!")
 
 with tab2:
-    st.markdown("### 📱 Takip Ettiğim Maçlar")
+    st.markdown("### 📱 Takip Ettiğim Maçlar (Canlı Kupon)")
+    
+    # Yeni Skor Yenileme Butonu
+    if st.button("🔄 Skorları ve Sonuçları Güncelle"):
+        with st.spinner("Tüm ligler taranıyor, skorlar güncelleniyor..."):
+            skorlari_guncelle()
+            st.success("Skorlar ve kupon durumları başarıyla güncellendi!")
+    
     kayitli_df = kayitli_kuponlari_getir()
     
     if not kayitli_df.empty:
-        gosterim_df = kayitli_df[['tarih', 'ev_sahibi', 'deplasman', 'tahmin', 'oran', 'formul_skoru', 'skor']]
-        gosterim_df.columns = ['Tarih', 'Ev Sahibi', 'Deplasman', 'Senin Tahminin', 'Oran', 'Senin Formülün', 'Skor Durumu']
+        # Görünümü iyileştirdik ve "Durum" sütununu (Kazandı/Kaybetti) ekledik
+        gosterim_df = kayitli_df[['tarih', 'ev_sahibi', 'deplasman', 'tahmin', 'oran', 'formul_skoru', 'skor', 'durum']]
+        gosterim_df.columns = ['Tarih', 'Ev Sahibi', 'Deplasman', 'Senin Tahminin', 'Adil Oran', 'Formül Skoru', 'Maç Skoru', 'Kupon Durumu']
+        
+        # Tabloyu ekrana basıyoruz
         st.dataframe(gosterim_df, hide_index=True, use_container_width=True)
         
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            if st.button("🗑️ Kuponu Temizle"):
-                kuponu_temizle()
-                st.rerun()
+        st.markdown("---")
+        if st.button("🗑️ Kuponu Temizle"):
+            kuponu_temizle()
+            st.rerun()
     else:
-        st.warning("Henüz kaydedilmiş bir maçınız bulunmuyor.")
+        st.warning("Henüz kaydedilmiş bir maçınız bulunmuyor. 1. Sekmeden maç analiz edip buraya kaydedebilirsiniz.")
 
 with tab3:
     st.markdown("### ⚖️ Yapay Zeka vs. Senin Özel Formülün")
-    
     if st.button("Son 50 Maçı Test Et"):
         with st.spinner('Geçmiş maçlar taranıyor, formül eşleştirmeleri yapılıyor...'):
             mac_tablosu, _ = verileri_cek(lig_kodu)
             if mac_tablosu is not None:
                 ev_guc, dep_guc, lig_ev_ort, lig_dep_ort = gucleri_hesapla(mac_tablosu)
-                
                 son_maclar = mac_tablosu.tail(50)
                 test_sonuclari = []
-                
                 bot_dogru = 0
                 formul_tetiklenen_mac_sayisi = 0
                 formul_dogru = 0
@@ -268,7 +311,6 @@ with tab3:
                     ev, dep, tarih = mac['Ev Sahibi'], mac['Deplasman'], mac['Tarih']
                     gercek_toplam = mac['Ev Gol'] + mac['Dep Gol']
                     gercek_durum = "ÜST" if gercek_toplam > 2.5 else "ALT"
-                    
                     try:
                         alt_y, ust_y = tahmin_olasiliklarini_al(ev, dep, ev_guc, dep_guc, lig_ev_ort, lig_dep_ort)
                         bot_tahmin = "ÜST" if ust_y > alt_y else "ALT"
@@ -281,8 +323,6 @@ with tab3:
                         
                         formul_tahmin = "-"
                         formul_basarili_mi = "-"
-                        
-                        # DİNAMİK YILDIZ ŞARTI BURADA ÇALIŞIYOR
                         if min_formul <= formul_skoru <= max_formul:
                             formul_tahmin = "ÜST (🌟)"
                             formul_tetiklenen_mac_sayisi += 1
@@ -292,19 +332,10 @@ with tab3:
                             else:
                                 formul_basarili_mi = "❌"
                                 
-                        test_sonuclari.append({
-                            "Maç": f"{ev} - {dep}", 
-                            "Gerçek": gercek_durum, 
-                            "Bot Tahmini": bot_tahmin, 
-                            "Bot Sonuç": bot_basarili_mi,
-                            "Formül Skoru": round(formul_skoru, 2),
-                            "Formül Tahmini": formul_tahmin,
-                            "Formül Sonuç": formul_basarili_mi
-                        })
+                        test_sonuclari.append({"Maç": f"{ev} - {dep}", "Gerçek": gercek_durum, "Bot Tahmini": bot_tahmin, "Bot Sonuç": bot_basarili_mi, "Formül Skoru": round(formul_skoru, 2), "Formül Tahmini": formul_tahmin, "Formül Sonuç": formul_basarili_mi})
                     except KeyError: pass
                 
                 st.dataframe(pd.DataFrame(test_sonuclari), use_container_width=True)
-                
                 col1, col2 = st.columns(2)
                 with col1:
                     st.metric("🤖 Botun Genel Başarı Oranı", f"% {(bot_dogru/len(test_sonuclari))*100:.1f}", f"50 maçta {bot_dogru} doğru")
