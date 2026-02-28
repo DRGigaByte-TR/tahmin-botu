@@ -5,7 +5,7 @@ import math
 import sqlite3
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Tahmin Botu v10.0", page_icon="🏆", layout="wide")
+st.set_page_config(page_title="Tahmin Botu v11.0", page_icon="🏆", layout="wide")
 
 API_KEY = "ce08bcf6a8984a09b6cfdcc541e014a9"
 headers = {'X-Auth-Token': API_KEY}
@@ -20,12 +20,14 @@ LIGLER = {
     "Portekiz Primeira Liga": "PPL"
 }
 
-# --- YENİ VERİ TABANI (Logolar eklendi) ---
+# --- YENİ VERİ TABANI (Lig İsimleri ve Logoları Eklendi) ---
 def init_db():
     conn = sqlite3.connect('kuponlar.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS kupon_v3 (
+    c.execute('''CREATE TABLE IF NOT EXISTS kupon_v4 (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    lig TEXT,
+                    lig_logo TEXT,
                     tarih TEXT,
                     ev_logo TEXT,
                     ev_sahibi TEXT,
@@ -47,29 +49,29 @@ def kuponu_kaydet(df, kaynak="Manuel"):
     conn = sqlite3.connect('kuponlar.db')
     for index, row in df.iterrows():
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM kupon_v3 WHERE ev_sahibi=? AND deplasman=? AND kaynak=?", (row['Ev Sahibi'], row['Deplasman'], kaynak))
+        cursor.execute("SELECT * FROM kupon_v4 WHERE ev_sahibi=? AND deplasman=? AND kaynak=?", (row['Ev Sahibi'], row['Deplasman'], kaynak))
         if cursor.fetchone() is None:
-            conn.execute("INSERT INTO kupon_v3 (tarih, ev_logo, ev_sahibi, dep_logo, deplasman, tahmin, oran, formul_skoru, kaynak) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                         (row['Tarih'], row.get('Ev Logo', ''), row['Ev Sahibi'], row.get('Dep Logo', ''), row['Deplasman'], row['Tahmin'], row['Botun Adil Oranı'], row['Özel Formül Skoru'], kaynak))
+            conn.execute("INSERT INTO kupon_v4 (lig, lig_logo, tarih, ev_logo, ev_sahibi, dep_logo, deplasman, tahmin, oran, formul_skoru, kaynak) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         (row.get('Lig', ''), row.get('Lig Logo', ''), row['Tarih'], row.get('Ev Logo', ''), row['Ev Sahibi'], row.get('Dep Logo', ''), row['Deplasman'], row['Tahmin'], row['Botun Adil Oranı'], row['Özel Formül Skoru'], kaynak))
     conn.commit()
     conn.close()
 
 def kayitli_kuponlari_getir():
     conn = sqlite3.connect('kuponlar.db')
-    df = pd.read_sql_query("SELECT id, tarih, ev_logo, ev_sahibi, dep_logo, deplasman, tahmin, oran, formul_skoru, skor, durum, kaynak FROM kupon_v3 ORDER BY id DESC", conn)
+    df = pd.read_sql_query("SELECT id, lig, lig_logo, tarih, ev_logo, ev_sahibi, dep_logo, deplasman, tahmin, oran, formul_skoru, skor, durum, kaynak FROM kupon_v4 ORDER BY id DESC", conn)
     conn.close()
     return df
 
 def kuponu_temizle():
     conn = sqlite3.connect('kuponlar.db')
-    conn.execute("DELETE FROM kupon_v3")
+    conn.execute("DELETE FROM kupon_v4")
     conn.commit()
     conn.close()
 
 def skorlari_guncelle():
     conn = sqlite3.connect('kuponlar.db')
     c = conn.cursor()
-    c.execute("SELECT id, ev_sahibi, deplasman, tahmin FROM kupon_v3 WHERE durum LIKE '%Bekliyor%'")
+    c.execute("SELECT id, ev_sahibi, deplasman, tahmin FROM kupon_v4 WHERE durum LIKE '%Bekliyor%'")
     bekleyenler = c.fetchall()
     
     if not bekleyenler:
@@ -105,7 +107,7 @@ def skorlari_guncelle():
                     skor_str = f"{ev_g} - {dep_g}"
                     gercek_durum = "ÜST" if (ev_g + dep_g) > 2.5 else "ALT"
                     sonuc = "✅ Kazandı" if tahmin == gercek_durum else "❌ Kaybetti"
-                    c.execute("UPDATE kupon_v3 SET skor=?, durum=? WHERE id=?", (skor_str, sonuc, m_id))
+                    c.execute("UPDATE kupon_v4 SET skor=?, durum=? WHERE id=?", (skor_str, sonuc, m_id))
                     guncellenen_sayi += 1
                     continue
                     
@@ -116,7 +118,7 @@ def skorlari_guncelle():
                     skor_str = str(g_match.get('Güncel Skor', '-'))
                     durum_api = str(g_match.get('Durum', ''))
                     if durum_api in ['IN_PLAY', 'PAUSED'] and skor_str != '-':
-                        c.execute("UPDATE kupon_v3 SET skor=? WHERE id=?", (skor_str, m_id))
+                        c.execute("UPDATE kupon_v4 SET skor=? WHERE id=?", (skor_str, m_id))
                         guncellenen_sayi += 1
         except Exception as e:
             continue
@@ -134,7 +136,12 @@ def verileri_cek(lig_kodu):
         return None, None
         
     if response.status_code == 200:
-        matches = response.json().get('matches', [])
+        data = response.json()
+        matches = data.get('matches', [])
+        
+        # YENİ: LİG LOGOSUNU ÇEKİYORUZ!
+        lig_logo_url = data.get('competition', {}).get('emblem', '')
+        
         bitmis = []
         gelecek = []
         simdi = datetime.now()
@@ -143,7 +150,6 @@ def verileri_cek(lig_kodu):
             durum = match['status']
             hafta = match.get('matchday', 0)
             
-            # LOGOLARI ÇEKİYORUZ!
             ev_takimi = match['homeTeam']['name']
             ev_logo = match['homeTeam'].get('crest', '') 
             dep_takimi = match['awayTeam']['name']
@@ -170,10 +176,10 @@ def verileri_cek(lig_kodu):
             
             if durum == 'FINISHED':
                 if ev_gol is not None and dep_gol is not None:
-                    bitmis.append({'Hafta': hafta, 'Tarih': tarih_str, 'Ev Logo': ev_logo, 'Ev Sahibi': ev_takimi, 'Dep Logo': dep_logo, 'Deplasman': dep_takimi, 'Ev Gol': ev_gol, 'Dep Gol': dep_gol})
+                    bitmis.append({'Lig Logo': lig_logo_url, 'Hafta': hafta, 'Tarih': tarih_str, 'Ev Logo': ev_logo, 'Ev Sahibi': ev_takimi, 'Dep Logo': dep_logo, 'Deplasman': dep_takimi, 'Ev Gol': ev_gol, 'Dep Gol': dep_gol})
             elif durum in ['SCHEDULED', 'TIMED', 'IN_PLAY', 'PAUSED']:
                 guncel_skor = f"{int(ev_gol)} - {int(dep_gol)}" if (ev_gol is not None and dep_gol is not None) else "-"
-                gelecek.append({'Hafta': hafta, 'Tarih': tarih_str, 'Ev Logo': ev_logo, 'Ev Sahibi': ev_takimi, 'Dep Logo': dep_logo, 'Deplasman': dep_takimi, 'Durum': durum, 'Güncel Skor': guncel_skor})
+                gelecek.append({'Lig Logo': lig_logo_url, 'Hafta': hafta, 'Tarih': tarih_str, 'Ev Logo': ev_logo, 'Ev Sahibi': ev_takimi, 'Dep Logo': dep_logo, 'Deplasman': dep_takimi, 'Durum': durum, 'Güncel Skor': guncel_skor})
                 
         return pd.DataFrame(bitmis), pd.DataFrame(gelecek)
     return None, None
@@ -209,16 +215,17 @@ def ozel_formul_hesapla(takim, df_bitmis):
     atilan_gol_toplami = sum([mac['Ev Gol'] if mac['Ev Sahibi'] == takim else mac['Dep Gol'] for index, mac in takim_maclari.iterrows()])
     return atilan_gol_toplami
 
-# Ortak Sütun Yapılandırması (Logolar İçin)
+# Ortak Sütun Yapılandırması (LİG LOGOLARI EKLENDİ)
 COLUMN_CONFIG = {
     "Kupona Ekle": st.column_config.CheckboxColumn("Seç"),
+    "Lig Logo": st.column_config.ImageColumn("", help="Lig"),
     "Ev Logo": st.column_config.ImageColumn("", help="Ev Sahibi Logo"),
     "Dep Logo": st.column_config.ImageColumn("", help="Deplasman Logo"),
     "İhtimal (%)": st.column_config.ProgressColumn("İhtimal (%)", format="%f%%", min_value=0, max_value=100)
 }
 
 # --- ARAYÜZ ---
-st.title("🏆 Yapay Zeka Tahmin Botu v10.0 (Premium UI)")
+st.title("🏆 Yapay Zeka Tahmin Botu v11.0 (Premium UI)")
 
 st.sidebar.markdown("### ⚙️ Genel Ayarlar")
 secilen_lig_adi = st.sidebar.selectbox("Lig Seçin:", list(LIGLER.keys()))
@@ -242,7 +249,7 @@ with tab1:
                 tahminler = []
                 for index, mac in gelecek_fikstur.iterrows():
                     ev, dep, hafta, tarih = mac['Ev Sahibi'], mac['Deplasman'], mac['Hafta'], mac['Tarih']
-                    ev_logo, dep_logo = mac['Ev Logo'], mac['Dep Logo']
+                    ev_logo, dep_logo, lig_logo_api = mac['Ev Logo'], mac['Dep Logo'], mac['Lig Logo']
                     durum_api, skor_api = mac['Durum'], mac['Güncel Skor']
                     try:
                         alt_y, ust_y = tahmin_olasiliklarini_al(ev, dep, ev_guc, dep_guc, lig_ev_ort, lig_dep_ort)
@@ -256,7 +263,14 @@ with tab1:
                         yildiz = "🌟" if min_formul <= formul_skoru <= max_formul else ""
                         
                         gosterilecek_skor = skor_api if durum_api in ['IN_PLAY', 'PAUSED'] else "-"
-                        tahminler.append({"Kupona Ekle": False, "Hafta": hafta, "Tarih": tarih, "Ev Logo": ev_logo, "Ev Sahibi": ev, "Dep Logo": dep_logo, "Deplasman": dep, "Tahmin": durum, "Botun Adil Oranı": adil_oran, "Özel Formül Skoru": round(formul_skoru, 2), "Yıldız": yildiz, "Canlı Skor": gosterilecek_skor})
+                        
+                        tahminler.append({
+                            "Kupona Ekle": False, "Lig Logo": lig_logo_api, "Lig": secilen_lig_adi, 
+                            "Hafta": hafta, "Tarih": tarih, "Ev Logo": ev_logo, "Ev Sahibi": ev, 
+                            "Dep Logo": dep_logo, "Deplasman": dep, "Tahmin": durum, 
+                            "Botun Adil Oranı": adil_oran, "Özel Formül Skoru": round(formul_skoru, 2), 
+                            "Yıldız": yildiz, "Canlı Skor": gosterilecek_skor
+                        })
                     except KeyError: pass
                 
                 st.session_state['gelecek_df'] = pd.DataFrame(tahminler)
@@ -273,7 +287,7 @@ with tab1:
             df_goster, 
             hide_index=True, 
             column_config=COLUMN_CONFIG, 
-            disabled=["Hafta", "Tarih", "Ev Logo", "Ev Sahibi", "Dep Logo", "Deplasman", "Tahmin", "Botun Adil Oranı", "Özel Formül Skoru", "Yıldız", "Canlı Skor"], 
+            disabled=["Lig Logo", "Lig", "Hafta", "Tarih", "Ev Logo", "Ev Sahibi", "Dep Logo", "Deplasman", "Tahmin", "Botun Adil Oranı", "Özel Formül Skoru", "Yıldız", "Canlı Skor"], 
             use_container_width=True
         )
         
@@ -287,7 +301,7 @@ with tab2:
     st.markdown("### 🔥 Bugün ve Yarının Fırsatları")
     
     if st.button("🚀 Yakın Zamanlı Kuponları Oluştur"):
-        with st.spinner("Avrupa maçları logolarıyla birlikte taranıyor..."):
+        with st.spinner("Avrupa maçları lig logolarıyla birlikte taranıyor..."):
             havuz = []
             limit_hatasi = False
             simdi = datetime.now()
@@ -303,7 +317,7 @@ with tab2:
                     ev_guc, dep_guc, l_ev_ort, l_dep_ort = gucleri_hesapla(b_df)
                     for _, mac in g_df.iterrows():
                         ev, dep, tarih_str = mac['Ev Sahibi'], mac['Deplasman'], mac['Tarih']
-                        ev_logo, dep_logo = mac['Ev Logo'], mac['Dep Logo']
+                        ev_logo, dep_logo, lig_logo_api = mac['Ev Logo'], mac['Dep Logo'], mac['Lig Logo']
                         
                         try:
                             mac_tarihi = datetime.strptime(tarih_str, '%d.%m.%Y %H:%M')
@@ -320,7 +334,7 @@ with tab2:
                             formul_skoru = (ev_son5 + dep_son5) / 10
                             
                             havuz.append({
-                                "Lig": l_isim, "Tarih": tarih_str, "Ev Logo": ev_logo, "Ev Sahibi": ev, 
+                                "Lig Logo": lig_logo_api, "Lig": l_isim, "Tarih": tarih_str, "Ev Logo": ev_logo, "Ev Sahibi": ev, 
                                 "Dep Logo": dep_logo, "Deplasman": dep, "Tahmin": durum, "İhtimal (%)": round(yuzde, 2), 
                                 "Botun Adil Oranı": round(100/yuzde, 2), "Özel Formül Skoru": round(formul_skoru, 2)
                             })
@@ -336,7 +350,7 @@ with tab2:
 
     if 'banko_kupon' in st.session_state:
         st.markdown("#### 🤖 Yapay Zeka Banko Kupon")
-        st.dataframe(st.session_state['banko_kupon'][['Lig', 'Tarih', 'Ev Logo', 'Ev Sahibi', 'Dep Logo', 'Deplasman', 'Tahmin', 'İhtimal (%)', 'Botun Adil Oranı']], hide_index=True, column_config=COLUMN_CONFIG)
+        st.dataframe(st.session_state['banko_kupon'][['Lig Logo', 'Lig', 'Tarih', 'Ev Logo', 'Ev Sahibi', 'Dep Logo', 'Deplasman', 'Tahmin', 'İhtimal (%)', 'Botun Adil Oranı']], hide_index=True, column_config=COLUMN_CONFIG)
         if st.button("💾 AI Banko Kuponunu Takibe Al"):
             kuponu_kaydet(st.session_state['banko_kupon'], kaynak="AI")
             st.success("Eklendi!")
@@ -344,7 +358,7 @@ with tab2:
         st.markdown("---")
         st.markdown("#### 🌟 Özel Formül Kuponun")
         if not st.session_state['formul_kupon'].empty:
-            st.dataframe(st.session_state['formul_kupon'][['Lig', 'Tarih', 'Ev Logo', 'Ev Sahibi', 'Dep Logo', 'Deplasman', 'Tahmin', 'İhtimal (%)', 'Özel Formül Skoru']], hide_index=True, column_config=COLUMN_CONFIG)
+            st.dataframe(st.session_state['formul_kupon'][['Lig Logo', 'Lig', 'Tarih', 'Ev Logo', 'Ev Sahibi', 'Dep Logo', 'Deplasman', 'Tahmin', 'İhtimal (%)', 'Özel Formül Skoru']], hide_index=True, column_config=COLUMN_CONFIG)
             if st.button("💾 Formül Kuponunu Takibe Al"):
                 kuponu_kaydet(st.session_state['formul_kupon'], kaynak="Formul")
                 st.success("Eklendi!")
@@ -369,8 +383,8 @@ with tab3:
         def tablo_bas(df_alt, baslik):
             if not df_alt.empty:
                 st.markdown(baslik)
-                gosterim = df_alt[['tarih', 'ev_logo', 'ev_sahibi', 'dep_logo', 'deplasman', 'tahmin', 'oran', 'formul_skoru', 'skor', 'durum']]
-                gosterim.columns = ['Tarih', 'Ev Logo', 'Ev Sahibi', 'Dep Logo', 'Deplasman', 'Tahmin', 'Oran/İhtimal', 'Formül Skoru', 'Skor', 'Durum']
+                gosterim = df_alt[['lig_logo', 'lig', 'tarih', 'ev_logo', 'ev_sahibi', 'dep_logo', 'deplasman', 'tahmin', 'oran', 'formul_skoru', 'skor', 'durum']]
+                gosterim.columns = ['Lig Logo', 'Lig', 'Tarih', 'Ev Logo', 'Ev Sahibi', 'Dep Logo', 'Deplasman', 'Tahmin', 'Oran/İhtimal', 'Formül Skoru', 'Skor', 'Durum']
                 st.dataframe(gosterim, hide_index=True, use_container_width=True, column_config=COLUMN_CONFIG)
 
         df_manuel = kayitli_df[kayitli_df['kaynak'] == 'Manuel']
@@ -401,7 +415,7 @@ with tab4:
                 bot_dogru = formul_tet_sayi = formul_dogru = 0
                 for index, mac in son_maclar.iterrows():
                     ev, dep, tarih = mac['Ev Sahibi'], mac['Deplasman'], mac['Tarih']
-                    ev_logo, dep_logo = mac['Ev Logo'], mac['Dep Logo']
+                    ev_logo, dep_logo, lig_logo_api = mac['Ev Logo'], mac['Dep Logo'], mac['Lig Logo']
                     gercek_toplam = mac['Ev Gol'] + mac['Dep Gol']
                     gercek_durum = "ÜST" if gercek_toplam > 2.5 else "ALT"
                     try:
@@ -422,6 +436,6 @@ with tab4:
                                 formul_dogru += 1
                             else: f_sonuc = "❌"
                                 
-                        test_sonuclari.append({"Ev Logo": ev_logo, "Ev Sahibi": ev, "Dep Logo": dep_logo, "Deplasman": dep, "Gerçek": gercek_durum, "Bot Tahmin": bot_tahmin, "Bot Sonuç": bot_basarili_mi, "Formül Skoru": round(f_skor, 2), "Formül Sonuç": f_sonuc})
+                        test_sonuclari.append({"Lig Logo": lig_logo_api, "Ev Logo": ev_logo, "Ev Sahibi": ev, "Dep Logo": dep_logo, "Deplasman": dep, "Gerçek": gercek_durum, "Bot Tahmin": bot_tahmin, "Bot Sonuç": bot_basarili_mi, "Formül Skoru": round(f_skor, 2), "Formül Sonuç": f_sonuc})
                     except KeyError: pass
                 st.dataframe(pd.DataFrame(test_sonuclari), use_container_width=True, column_config=COLUMN_CONFIG)
